@@ -307,9 +307,9 @@
     BOOL animate = [self boolValue:popup[@"animateProgress"] fallback:YES] && !reduceMotion;
     if (animate && to > from) {
         NSDate *started = [NSDate date];
-        __weak typeof(self) weakSelf = self;
+        __weak __typeof__(self) weakSelf = self;
         self.timer = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
-            typeof(self) strongSelf = weakSelf;
+            __typeof__(weakSelf) strongSelf = weakSelf;
             if (!strongSelf || generation != strongSelf.generation || !panel.superview) { [timer invalidate]; return; }
             CGFloat elapsed = -[started timeIntervalSinceNow];
             CGFloat fraction = MIN(1.0, elapsed / duration);

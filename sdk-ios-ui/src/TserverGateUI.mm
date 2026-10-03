@@ -56,7 +56,7 @@ static NSString *TserverGateInfoString(NSDictionary *source, NSString *key) {
     return [value isKindOfClass:NSString.class] ? value : @"";
 }
 
-static NSString *TserverGateInfoLicenseDictionary(NSDictionary *result) {
+static NSDictionary *TserverGateInfoLicenseDictionary(NSDictionary *result) {
     id license = result[@"license"];
     return [license isKindOfClass:NSDictionary.class] ? license : @{};
 }

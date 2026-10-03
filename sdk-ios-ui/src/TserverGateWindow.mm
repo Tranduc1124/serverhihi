@@ -369,9 +369,13 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
     }
     self.hostCaptureObserverInstalled = YES;
     [self applyCaptureState];
+    // Hoisted out of the boxed expression: clang in Objective-C++ fails to parse
+    // a chained property access compared against nil inside @( ... )
+    // ("expected identifier" on the nil token).
+    UIView *secureCanvas = self.secureCaptureField.subviews.firstObject;
     TserverDiagnosticsRecord(@"capture", @"host content protection active", @{
         @"hostView": NSStringFromClass([self hostContentView].class),
-        @"secureCanvas": @([self.secureCaptureField.subviews.firstObject != nil]),
+        @"secureCanvas": @(secureCanvas != nil),
         @"hideScreenCapture": @(TserverSecurityPolicyHideScreenCapture()),
         @"protectScreenContent": @(TserverSecurityPolicyProtectScreenContent())
     });
