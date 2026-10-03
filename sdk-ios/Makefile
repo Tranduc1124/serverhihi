@@ -108,6 +108,14 @@ include ../sdk-ios-ui/src/Templates.mk
 # visibility raise reverse-engineering cost without changing the public ABI.
 libAPIClient_CFLAGS = -fobjc-arc -Iinclude -I../sdk-ios-ui/include -include TserverObfuscatedSymbols.h -O2 -g0 -fvisibility=hidden -ffunction-sections -fdata-sections
 libAPIClient_CCFLAGS = -include TserverObfuscatedSymbols.h -O2 -g0 -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections
+# .mm sources are Objective-C++ and use C++11 constexpr constructors plus C++14
+# lambdas (TS_OBF_NS). Without an explicit standard the toolchain falls back to
+# C++98 on some hosts, which rejects `constexpr ObfuscatedString(...)` and the
+# lambda in TS_OBF_NS. Force the standard in every language-specific block so
+# the last -std on the command line is the one that survives.
+libAPIClient_CXXFLAGS += -std=c++17
+libAPIClient_OBJCXXFLAGS += -std=c++17
+libAPIClient_CCFLAGS += -std=c++17
 # CLIENT_API_KEY is dual-XOR embedded by prepare_sdk_build — never -D plain hex.
 TSERVER_TLS_SPKI_PIN := $(strip $(TSERVER_TLS_SPKI_PIN))
 ifeq ($(filter-out clean before-clean after-clean,$(MAKECMDGOALS)),)
