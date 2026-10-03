@@ -651,6 +651,19 @@ NSString *TserverGateNormalizedValidContinueMode(NSString *mode) {
     NSString *title = [screen[@"title"] isKindOfClass:NSString.class] && [screen[@"title"] length] > 0 ? screen[@"title"] : fallbackTitle;
     NSString *buttonText = [screen[@"buttonText"] isKindOfClass:NSString.class] ? screen[@"buttonText"] : @"";
 
+    // On VALID the license rows belong in the message body: Key / Hết hạn / UUID
+    // as text. They used to be added as a UIAlertAction, which rendered the key
+    // as a tappable row between the message and the continue button.
+    NSString *licenseSummary = nil;
+    if ([self isValidStatus:status]) {
+        licenseSummary = [self licenseSummaryText:result];
+        if (licenseSummary.length > 0) {
+            message = message.length > 0
+                ? [NSString stringWithFormat:@"%@\n\n%@", message, licenseSummary]
+                : licenseSummary;
+        }
+    }
+
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
                                                                   message:message
                                                            preferredStyle:UIAlertControllerStyleAlert];
@@ -676,11 +689,8 @@ NSString *TserverGateNormalizedValidContinueMode(NSString *mode) {
             TserverGateTerminateApp();
         }]];
     } else if ([self isValidStatus:status]) {
-        // Report what was authorized before offering to continue.
-        NSString *licenseSummary = [self licenseSummaryText:result];
-        if (licenseSummary.length > 0) {
-            [alert addAction:[UIAlertAction actionWithTitle:licenseSummary style:UIAlertActionStyleDefault handler:nil]];
-        }
+        // The license rows are already in the message body, so the alert only
+        // carries the continue action.
         NSString *validButton = buttonText.length > 0 ? buttonText : @"Tiếp tục";
         [alert addAction:[UIAlertAction actionWithTitle:validButton style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             if (continueAuth) continueAuth();
