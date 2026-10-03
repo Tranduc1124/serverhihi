@@ -4,6 +4,7 @@
 #import "TserverSimpleUiPack.h"
 #import "TserverKeyEntryAssist.h"
 #import "TserverTemplateRegistry.h"
+#import "TserverGateUI.h"
 
 typedef void (^TserverGateActivateBlock)(NSString *key);
 
@@ -195,8 +196,8 @@ typedef void (^TserverGateActivateBlock)(NSString *key);
         NSDictionary *screens = [self.config.rawConfig[@"screens"] isKindOfClass:NSDictionary.class] ? self.config.rawConfig[@"screens"] : @{};
         NSDictionary *validScreen = [screens[@"valid"] isKindOfClass:NSDictionary.class] ? screens[@"valid"] : @{};
         NSString *screenContinue = [validScreen[@"continueMode"] isKindOfClass:NSString.class] ? validScreen[@"continueMode"] : @"";
-        NSString *continueMode = (screenContinue.length ? screenContinue : [self.config flowStringForKey:@"validAction" fallback:@"button"]).lowercaseString;
-        context.continueMode = [continueMode isEqualToString:@"auto"] ? TserverUiContinueModeAuto : ([continueMode isEqualToString:@"anywhere"] || [continueMode isEqualToString:@"overlaytap"] || [continueMode isEqualToString:@"overlay_tap"] ? TserverUiContinueModeOverlayTap : TserverUiContinueModeButton);
+        NSString *continueMode = TserverGateNormalizedValidContinueMode(screenContinue.length ? screenContinue : [self.config flowStringForKey:@"validAction" fallback:@"button"]);
+        context.continueMode = [continueMode isEqualToString:@"anywhere"] ? TserverUiContinueModeOverlayTap : TserverUiContinueModeButton;
         context.startUuid = needUUID;
         context.submitKey = activate;
         context.retry = retry;
@@ -247,6 +248,13 @@ typedef void (^TserverGateActivateBlock)(NSString *key);
         ? message
         : [self string:screen[@"subtitle"] fallback:[self fallbackSubtitleForStatus:status]];
     NSString *buttonText = [self string:screen[@"buttonText"] fallback:[self fallbackButtonForStatus:status]];
+    // A missing URL scheme is a build defect, not an auth outcome: name it, and
+    // replace whatever retry/change-key copy the template picked with a Close.
+    BOOL isFatalConfigError = TserverGateResultIsFatalConfigError(result);
+    if (isFatalConfigError) {
+        title = [self string:screen[@"title"] fallback:@"Cấu hình app chưa đúng"];
+        buttonText = [self string:screen[@"closeButtonText"] fallback:TserverGateFatalConfigCloseButtonTitle()];
+    }
 
     BOOL isLoading = [status isEqualToString:@"LOADING"];
     BOOL isValid = [self isValidStatus:status];
@@ -328,28 +336,35 @@ typedef void (^TserverGateActivateBlock)(NSString *key);
         // validContinueMode:
         // - "button" (default): show primary "Tiếp tục" button
         // - "anywhere" / "tap_anywhere": no button; tap anywhere on card/overlay continues
-        // - "auto": no button (caller may auto-continue via flow.validAction=auto)
+        // "auto" is retired — it dismissed the screen on a timer, which would hide
+        // the license details below the moment they were granted.
         // Also accept screens.valid.showButton=false / buttonText=""
         NSString *continueMode = [self validContinueModeForScreen:screen];
-        BOOL showButton = [continueMode isEqualToString:@"button"];
-        if (showButton) {
+        // Report what was authorized before asking the user to continue.
+        NSDictionary *licenseInfo = TserverGateLicenseInfoFromResult(result);
+        UIView *licenseInfoView = TserverGateLicenseInfoView(licenseInfo,
+                                                            [self.config colorForKey:@"text" fallback:UIColor.whiteColor],
+                                                            [self.config colorForKey:@"mutedText" fallback:UIColor.lightGrayColor],
+                                                            [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]);
+        if (licenseInfo.count > 0) {
+            [stack addArrangedSubview:licenseInfoView];
+        }
+        if ([continueMode isEqualToString:@"button"]) {
             UIButton *button = [TserverComponents primaryButton:buttonText config:self.config];
             [button addTarget:self action:@selector(continueTapped) forControlEvents:UIControlEventTouchUpInside];
             [stack addArrangedSubview:button];
         } else {
             // Hint text when user can tap anywhere
-            if ([continueMode isEqualToString:@"anywhere"] || [continueMode isEqualToString:@"tap_anywhere"]) {
-                NSString *hint = [self string:screen[@"tapHint"] fallback:@"Chạm vào màn hình để tiếp tục"];
-                [stack addArrangedSubview:[TserverComponents subtitleLabel:hint config:self.config]];
-                self.userInteractionEnabled = YES;
-                self.card.userInteractionEnabled = YES;
-                UITapGestureRecognizer *cardTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(continueTapped)];
-                [self.card addGestureRecognizer:cardTap];
-                [self.continueGestures addObject:cardTap];
-                UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(continueTapped)];
-                [self addGestureRecognizer:bgTap];
-                [self.continueGestures addObject:bgTap];
-            }
+            NSString *hint = [self string:screen[@"tapHint"] fallback:@"Chạm vào màn hình để tiếp tục"];
+            [stack addArrangedSubview:[TserverComponents subtitleLabel:hint config:self.config]];
+            self.userInteractionEnabled = YES;
+            self.card.userInteractionEnabled = YES;
+            UITapGestureRecognizer *cardTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(continueTapped)];
+            [self.card addGestureRecognizer:cardTap];
+            [self.continueGestures addObject:cardTap];
+            UITapGestureRecognizer *bgTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(continueTapped)];
+            [self addGestureRecognizer:bgTap];
+            [self.continueGestures addObject:bgTap];
         }
     } else if ([status isEqualToString:@"EXPIRED"] ||
                [status isEqualToString:@"REVOKED"] ||
@@ -391,6 +406,14 @@ typedef void (^TserverGateActivateBlock)(NSString *key);
             [button addTarget:self action:@selector(retryTapped) forControlEvents:UIControlEventTouchUpInside];
             [stack addArrangedSubview:button];
         }
+    } else if (isFatalConfigError) {
+        // Single Close button that quits. No retry, no key entry: this app can
+        // never complete Device Verify, so any other action is a dead end.
+        NSString *errorText = [self formattedErrorForStatus:status message:message];
+        if (errorText.length > 0) [stack addArrangedSubview:[TserverComponents errorLabel:errorText config:self.config]];
+        UIButton *button = [TserverComponents primaryButton:buttonText config:self.config];
+        [button addTarget:self action:@selector(closeAndTerminateTapped) forControlEvents:UIControlEventTouchUpInside];
+        [stack addArrangedSubview:button];
     } else if ([self isErrorStatus:status]) {
         NSString *errorText = [self formattedErrorForStatus:status message:message];
         if (errorText.length > 0) {
@@ -1458,6 +1481,11 @@ typedef void (^TserverGateActivateBlock)(NSString *key);
     [TserverTemplateRegistry impactForAction:@"tap" config:self.config.rawConfig ?: @{}];
     if (self.retryBlock) self.retryBlock();
 }
+
+- (void)closeAndTerminateTapped {
+    [TserverTemplateRegistry impactForAction:@"tap" config:self.config.rawConfig ?: @{}];
+    TserverGateTerminateApp();
+}
 - (void)showNeedKeyTapped {
     [TserverTemplateRegistry impactForAction:@"tap" config:self.config.rawConfig ?: @{}];
     if (self.showNeedKeyBlock) self.showNeedKeyBlock();
@@ -1486,22 +1514,9 @@ typedef void (^TserverGateActivateBlock)(NSString *key);
         }
     }
     if (mode.length == 0) {
-        NSString *flowAction = [self.config flowStringForKey:@"validAction" fallback:@"button"];
-        // flow.validAction: auto | button | anywhere
-        if ([flowAction isEqualToString:@"auto"]) mode = @"auto";
-        else if ([flowAction isEqualToString:@"anywhere"] || [flowAction isEqualToString:@"tap_anywhere"]) mode = @"anywhere";
-        else mode = @"button";
+        mode = [self.config flowStringForKey:@"validAction" fallback:@"button"];
     }
-    mode = mode.lowercaseString;
-    if ([mode isEqualToString:@"tap"] || [mode isEqualToString:@"any"] || [mode isEqualToString:@"fullscreen"]) {
-        mode = @"anywhere";
-    }
-    if (![mode isEqualToString:@"button"] &&
-        ![mode isEqualToString:@"anywhere"] &&
-        ![mode isEqualToString:@"tap_anywhere"] &&
-        ![mode isEqualToString:@"auto"]) {
-        mode = @"button";
-    }
+    mode = TserverGateNormalizedValidContinueMode(mode);
     return mode;
 }
 

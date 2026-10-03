@@ -2,6 +2,7 @@
 #import "TserverTemplateRegistry.h"
 #import "TserverKeyEntryAssist.h"
 #import "TserverTemplateCatalog.gen.mm"
+#import "TserverGateUI.h"
 
 @implementation TserverSimpleUiContext
 @end
@@ -287,15 +288,13 @@ void TserverForceLoadNativeUiPacks(void) {
 - (UIColor *)successColor { return [self styleColor:@"success" fallback:[UIColor colorWithRed:0.31 green:1 blue:0.72 alpha:1]]; }
 
 - (TserverUiContinueMode)resolvedContinueMode {
-    NSString *fromScreen = [[self screenString:@"continueMode" fallback:@""] lowercaseString];
+    NSString *fromScreen = [self screenString:@"continueMode" fallback:@""];
     NSDictionary *flow = [self.context.config[@"flow"] isKindOfClass:NSDictionary.class] ? self.context.config[@"flow"] : @{};
-    NSString *fromFlow = [flow[@"validAction"] isKindOfClass:NSString.class] ? [flow[@"validAction"] lowercaseString] : @"";
-    NSString *mode = fromScreen.length ? fromScreen : (fromFlow.length ? fromFlow : @"button");
-    if ([mode isEqualToString:@"auto"]) return TserverUiContinueModeAuto;
-    if ([mode isEqualToString:@"anywhere"] || [mode isEqualToString:@"overlaytap"] || [mode isEqualToString:@"overlay_tap"]) {
-        return TserverUiContinueModeOverlayTap;
-    }
-    return TserverUiContinueModeButton;
+    NSString *fromFlow = [flow[@"validAction"] isKindOfClass:NSString.class] ? flow[@"validAction"] : @"";
+    // "auto" is retired: a self-dismissing VALID screen would hide the license
+    // details the moment they were granted.
+    NSString *mode = TserverGateNormalizedValidContinueMode(fromScreen.length ? fromScreen : (fromFlow.length ? fromFlow : @"button"));
+    return [mode isEqualToString:@"anywhere"] ? TserverUiContinueModeOverlayTap : TserverUiContinueModeButton;
 }
 
 #pragma mark - Widgets
@@ -411,6 +410,13 @@ void TserverForceLoadNativeUiPacks(void) {
         : [self screenString:@"subtitle" fallback:(loading ? @"Vui lòng chờ…" : (updateRequired ? @"Vui lòng cập nhật để tiếp tục." : @"Đang xử lý xác thực…"))];
     NSString *buttonText = [self screenString:@"buttonText" fallback:(valid ? @"Tiếp tục" : (updateRequired ? @"Cập nhật" : @"Thử lại"))];
     NSString *tapHint = [self screenString:@"tapHint" fallback:@"Chạm để tiếp tục"];
+    // A missing URL scheme is a build defect, not an auth outcome: name it, and
+    // replace whatever retry/change-key copy the pack picked with a Close.
+    BOOL fatalConfigError = TserverGateResultIsFatalConfigError(self.context.result);
+    if (fatalConfigError) {
+        title = [self screenString:@"title" fallback:@"Cấu hình app chưa đúng"];
+        buttonText = [self screenString:@"closeButtonText" fallback:TserverGateFatalConfigCloseButtonTitle()];
+    }
 
     UILabel *titleLabel = [self label:title size:18 weight:UIFontWeightBold];
     titleLabel.textColor = valid ? [self successColor] : (loading ? [self textColor] : [self dangerColor]);
@@ -421,23 +427,31 @@ void TserverForceLoadNativeUiPacks(void) {
 
     TserverUiContinueMode mode = [self resolvedContinueMode];
     if (valid) {
+        // Report what was authorized before asking the user to continue.
+        NSDictionary *licenseInfo = TserverGateLicenseInfoFromResult(self.context.result);
+        if (licenseInfo.count > 0) {
+            [self.stack addArrangedSubview:TserverGateLicenseInfoView(licenseInfo,
+                                                                      [self textColor],
+                                                                      [self mutedTextColor],
+                                                                      [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold])];
+        }
         if (mode == TserverUiContinueModeButton) {
             [self.stack addArrangedSubview:[self button:buttonText action:@selector(continueFromOverlay)]];
-        } else if (mode == TserverUiContinueModeOverlayTap) {
+        } else {
             UILabel *hint = [self label:tapHint size:12 weight:UIFontWeightMedium];
             hint.textColor = [self mutedTextColor];
             [self.stack addArrangedSubview:hint];
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(continueFromOverlay)];
             [self.root addGestureRecognizer:tap];
-        } else if (mode == TserverUiContinueModeAuto) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [self continueFromOverlay];
-            });
         }
     } else if (updateRequired) {
         UIButton *button = [self button:buttonText action:@selector(openUpdateTapped:)];
         if (updateUrl.length > 0) button.accessibilityValue = updateUrl;
         [self.stack addArrangedSubview:button];
+    } else if (fatalConfigError) {
+        // Single Close button that quits. No retry, no key entry: this app can
+        // never complete Device Verify, so any other action is a dead end.
+        [self.stack addArrangedSubview:[self button:buttonText action:@selector(closeAndTerminateTapped)]];
     } else if (!loading) {
         SEL action = (self.context.showNeedKey || !self.context.retry) ? @selector(changeKeyTapped) : @selector(retryTapped);
         NSString *fallbackActionTitle = self.context.showNeedKey ? @"Đổi key khác" : @"Thử lại";
@@ -595,6 +609,11 @@ void TserverForceLoadNativeUiPacks(void) {
     } else if (self.context.retry) {
         self.context.retry();
     }
+}
+
+- (void)closeAndTerminateTapped {
+    [self playHaptic:@"tap"];
+    TserverGateTerminateApp();
 }
 
 - (void)openUpdateTapped:(UIButton *)sender {

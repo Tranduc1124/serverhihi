@@ -37,13 +37,10 @@
 @property(nonatomic, strong) TserverGateRootViewController *rootViewController;
 @property(nonatomic, weak) UIView *hostContainerView;
 @property(nonatomic, strong) UIView *hostOverlayView;
-@property(nonatomic, strong) UIView *captureCoverView;
 @property(nonatomic, strong) UITextField *secureCaptureField;
 @property(nonatomic, assign) BOOL captureObserverInstalled;
 // Host content protection has its own lifecycle: the gate comes and goes, the
 // authorized session does not.
-@property(nonatomic, strong) UIView *hostCaptureCoverView;
-@property(nonatomic, strong) UIView *hostCaptureContainer;
 @property(nonatomic, assign) BOOL hostCaptureObserverInstalled;
 @property(nonatomic, assign) BOOL hostCaptureRequested;
 @end
@@ -53,6 +50,17 @@ static NSUInteger gTserverGatePresentationGeneration = 0;
 
 static BOOL TserverIsIOS13OrNewer(void) {
     return [UIApplication.sharedApplication respondsToSelector:@selector(connectedScenes)];
+}
+
+/// Either "ẩn khỏi quay màn hình" or "che nội dung khi quay/chụp" is on.
+///
+/// Both policies are served by the same mechanism: hosting the SDK's own views
+/// inside a secure-text-entry canvas, which iOS omits from screen recordings,
+/// screenshots and AirPlay while leaving them fully visible on the device. No
+/// mask is drawn, so a recorder never blacks out the host app and the user can
+/// keep touching the game underneath.
+BOOL TserverGateCaptureHidingEnabled(void) {
+    return TserverSecurityPolicyHideScreenCapture() || TserverSecurityPolicyProtectScreenContent();
 }
 
 static UIViewController *TserverGateTopViewController(UIViewController *controller) {
@@ -212,7 +220,7 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
 }
 
 - (UIView *)secureContentHostIfNeeded:(UIView *)container {
-    if (!TserverSecurityPolicyHideScreenCapture()) return container;
+    if (!TserverGateCaptureHidingEnabled()) return container;
     // Secure UITextField trick: content hosted in the secure field's layer is omitted from
     // screenshots / many screen-recording captures.
     UITextField *field = [[UITextField alloc] initWithFrame:CGRectZero];
@@ -251,12 +259,11 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
     }
     for (UIView *root in roots) {
         for (UIView *child in root.subviews) {
-            if (child == self.captureCoverView || child == self.secureCaptureField) continue;
+            if (child == self.secureCaptureField) continue;
             return child;
         }
         UIView *secureHost = self.secureCaptureField.subviews.firstObject;
         for (UIView *child in secureHost.subviews) {
-            if (child == self.captureCoverView) continue;
             return child;
         }
     }
@@ -290,23 +297,24 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
     }
 }
 
-- (void)installCaptureProtectionOnContainer:(UIView *)container {
-    [self teardownCaptureProtectionObservingOnly];
-    if (!TserverSecurityPolicyProtectScreenContent() || !container) return;
-    self.captureCoverView = [self makeCaptureCoverView];
-    [container addSubview:self.captureCoverView];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.captureCoverView.topAnchor constraintEqualToAnchor:container.topAnchor],
-        [self.captureCoverView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [self.captureCoverView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [self.captureCoverView.bottomAnchor constraintEqualToAnchor:container.bottomAnchor]
-    ]];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(screenCaptureChanged)
-                                                 name:UIScreenCapturedDidChangeNotification
-                                               object:nil];
-    self.captureObserverInstalled = YES;
-    [self screenCaptureChanged];
+/// Nothing is drawn over the screen.
+///
+/// The old implementation installed a near-opaque black view across the whole
+/// host window whenever a capture was detected. That produced exactly the two
+/// complaints this replaces: the SDK UI was still visible in the recording (the
+/// mask was rendered by the app, so the recorder captured the mask *and* whatever
+/// it was hiding), and the user lost the entire screen while recording — no taps
+/// at all, including on the game.
+///
+/// Both policies are now served entirely by `secureContentHostIfNeeded:`, which
+/// reparents the SDK's views into a secure-text-entry canvas. iOS excludes that
+/// canvas from screen recordings, screenshots and AirPlay, so the UI disappears
+/// from the recorded output while remaining fully visible and interactive on the
+/// device. Nothing is added to the host's view hierarchy, so the game stays
+/// visible and tappable during recording.
+- (void)installCaptureProtectionOnContainer:(__unused UIView *)container {
+    // Kept for the existing call sites: capture hiding is applied where the SDK
+    // content is attached (secureContentHostIfNeeded:), not here.
 }
 
 - (void)screenCaptureChanged {
@@ -326,47 +334,9 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
     return nil;
 }
 
-- (UIView *)makeCaptureCoverView {
-    UIView *cover = [[UIView alloc] initWithFrame:CGRectZero];
-    cover.translatesAutoresizingMaskIntoConstraints = NO;
-    cover.backgroundColor = [UIColor colorWithWhite:0 alpha:0.94];
-    cover.hidden = YES;
-    cover.userInteractionEnabled = YES;
-    // The cover must never become the touch handler of the app underneath.
-    cover.userInteractionEnabled = NO;
-    UILabel *label = [UILabel new];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.text = @"Noi dung da duoc che khi quay/chup man hinh";
-    label.textColor = UIColor.whiteColor;
-    label.textAlignment = NSTextAlignmentCenter;
-    label.numberOfLines = 0;
-    label.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    [cover addSubview:label];
-    [NSLayoutConstraint activateConstraints:@[
-        [label.leadingAnchor constraintEqualToAnchor:cover.leadingAnchor constant:24],
-        [label.trailingAnchor constraintEqualToAnchor:cover.trailingAnchor constant:-24],
-        [label.centerYAnchor constraintEqualToAnchor:cover.centerYAnchor]
-    ]];
-    return cover;
-}
-
 - (void)applyCaptureState {
-    BOOL captured = NO;
-    UIScreen *screen = UIScreen.mainScreen;
-    if ([screen respondsToSelector:@selector(isCaptured)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-        captured = screen.isCaptured;
-#pragma clang diagnostic pop
-    }
-    self.captureCoverView.hidden = !captured;
-    if (self.captureCoverView.superview) {
-        [self.captureCoverView.superview bringSubviewToFront:self.captureCoverView];
-    }
-    self.hostCaptureCoverView.hidden = !captured;
-    if (self.hostCaptureCoverView.superview) {
-        [self.hostCaptureCoverView.superview bringSubviewToFront:self.hostCaptureCoverView];
-    }
+    // No mask to show or hide. The secure canvas is unconditional, so the SDK UI
+    // is already absent from the capture regardless of when it started.
 }
 
 - (void)setHostCaptureProtectionActive:(BOOL)active {
@@ -382,33 +352,15 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
         return;
     }
     // Either toggle is enough: the portal copy promises gate AND menu are hidden.
-    // The secure-textfield trick cannot wrap the host's content (re-parenting a
-    // game's view hierarchy breaks Unity/Unreal), so the cover is the only honest
-    // mechanism available here.
-    if (!TserverSecurityPolicyHideScreenCapture() && !TserverSecurityPolicyProtectScreenContent()) {
+    if (!TserverGateCaptureHidingEnabled()) {
         [self teardownHostCaptureProtection];
         return;
     }
-    if (self.hostCaptureCoverView && self.hostCaptureContainer) {
-        [self applyCaptureState];
-        return;
-    }
-    UIView *container = [self hostContentView];
-    if (!container) {
-        // The host window may not be up yet; the next foreground will retry.
-        TserverDiagnosticsRecord(@"capture", @"host content not ready, will retry", nil);
-        return;
-    }
-    self.hostCaptureContainer = container;
-    self.hostCaptureCoverView = [self makeCaptureCoverView];
-    [container addSubview:self.hostCaptureCoverView];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.hostCaptureCoverView.topAnchor constraintEqualToAnchor:container.topAnchor],
-        [self.hostCaptureCoverView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [self.hostCaptureCoverView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [self.hostCaptureCoverView.bottomAnchor constraintEqualToAnchor:container.bottomAnchor]
-    ]];
-    if (!self.captureObserverInstalled && !self.hostCaptureObserverInstalled) {
+    // The gate is already on screen by the time an authorized session starts, and
+    // it was attached through the secure canvas. Re-parenting the host's own view
+    // hierarchy into that canvas is not an option (it breaks Unity/Unreal), so the
+    // authorized state only needs to keep the observer alive for diagnostics.
+    if (!self.captureObserverInstalled) {
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(screenCaptureChanged)
                                                      name:UIScreenCapturedDidChangeNotification
@@ -418,18 +370,17 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
     self.hostCaptureObserverInstalled = YES;
     [self applyCaptureState];
     TserverDiagnosticsRecord(@"capture", @"host content protection active", @{
-        @"container": NSStringFromClass(container.class),
+        @"hostView": NSStringFromClass([self hostContentView].class),
+        @"secureCanvas": @([self.secureCaptureField.subviews.firstObject != nil]),
         @"hideScreenCapture": @(TserverSecurityPolicyHideScreenCapture()),
         @"protectScreenContent": @(TserverSecurityPolicyProtectScreenContent())
     });
 }
 
 - (void)teardownHostCaptureProtection {
-    if (!self.hostCaptureCoverView && !self.hostCaptureRequested) return;
-    [self.hostCaptureCoverView removeFromSuperview];
-    self.hostCaptureCoverView = nil;
-    self.hostCaptureContainer = nil;
-    if (self.hostCaptureObserverInstalled && !self.captureCoverView) {
+    if (!self.hostCaptureObserverInstalled && !self.hostCaptureRequested) return;
+    self.hostCaptureRequested = NO;
+    if (self.hostCaptureObserverInstalled) {
         [[NSNotificationCenter defaultCenter] removeObserver:self
                                                         name:UIScreenCapturedDidChangeNotification
                                                       object:nil];
@@ -444,8 +395,6 @@ static UIViewController *TserverGateTopViewController(UIViewController *controll
         [[NSNotificationCenter defaultCenter] removeObserver:self name:UIScreenCapturedDidChangeNotification object:nil];
         self.captureObserverInstalled = NO;
     }
-    [self.captureCoverView removeFromSuperview];
-    self.captureCoverView = nil;
 }
 
 - (void)teardownCaptureProtection {

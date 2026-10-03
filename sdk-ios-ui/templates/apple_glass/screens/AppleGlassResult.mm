@@ -1,4 +1,5 @@
 #import "TserverSimpleUiPack.h"
+#import "TserverGateUI.h"
 #import "../AppleGlassPrivate.h"
 
 void TserverAppleGlassBuildResult(TserverSimpleUiPackBase *pack) {
@@ -13,6 +14,13 @@ void TserverAppleGlassBuildResult(TserverSimpleUiPackBase *pack) {
         ? message
         : [pack screenString:@"subtitle" fallback:(valid ? @"Bản quyền hợp lệ." : @"Vui lòng thử lại sau.")];
     NSString *buttonText = [pack screenString:@"buttonText" fallback:(valid ? @"Tiếp tục" : (updateRequired ? @"Cập nhật" : @"Thử lại"))];
+    // A missing URL scheme is a build defect, not an auth outcome: name it, and
+    // replace whatever retry/change-key copy the pack picked with a Close.
+    BOOL fatalConfigError = TserverGateResultIsFatalConfigError(pack.context.result);
+    if (fatalConfigError) {
+        title = [pack screenString:@"title" fallback:@"Cấu hình app chưa đúng"];
+        buttonText = [pack screenString:@"closeButtonText" fallback:TserverGateFatalConfigCloseButtonTitle()];
+    }
 
     // Color tone
     UIColor *tone = nil;
@@ -67,24 +75,34 @@ void TserverAppleGlassBuildResult(TserverSimpleUiPackBase *pack) {
             [pack.stack addArrangedSubview:grouped];
         }
 
+        // Report what was authorized before asking the user to continue.
+        NSDictionary *licenseInfo = TserverGateLicenseInfoFromResult(pack.context.result);
+        if (licenseInfo.count > 0) {
+            [pack.stack addArrangedSubview:TserverGateLicenseInfoView(licenseInfo,
+                                                                      TAGLabelColor(),
+                                                                      TAGSecondaryLabelColor(),
+                                                                      [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold])];
+        }
+
         TserverUiContinueMode mode = [pack resolvedContinueMode];
         if (mode == TserverUiContinueModeButton) {
             UIButton *btn = TAGActionButton(pack, buttonText, tone, @selector(continueFromOverlay));
             [pack.stack addArrangedSubview:btn];
-        } else if (mode == TserverUiContinueModeOverlayTap) {
+        } else {
             UILabel *hint = [pack label:[pack screenString:@"tapHint" fallback:@"Chạm để tiếp tục"] size:12 weight:UIFontWeightMedium];
             hint.textColor = TAGSecondaryLabelColor();
             [pack.stack addArrangedSubview:hint];
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:pack action:@selector(continueFromOverlay)];
             [pack.root addGestureRecognizer:tap];
-        } else {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [pack continueFromOverlay];
-            });
         }
     } else if (updateRequired) {
         UIButton *btn = TAGActionButton(pack, buttonText, tone, @selector(openUpdateTapped:));
         if (updateUrl.length > 0) btn.accessibilityValue = updateUrl;
+        [pack.stack addArrangedSubview:btn];
+    } else if (fatalConfigError) {
+        // Single Close button that quits. No retry, no key entry: this app can
+        // never complete Device Verify, so any other action is a dead end.
+        UIButton *btn = TAGActionButton(pack, buttonText, tone, @selector(closeAndTerminateTapped));
         [pack.stack addArrangedSubview:btn];
     } else {
         SEL action = (pack.context.showNeedKey || !pack.context.retry) ? @selector(changeKeyTapped) : @selector(retryTapped);

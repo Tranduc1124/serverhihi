@@ -4,8 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, TserverUiContinueMode) {
     TserverUiContinueModeButton,
-    TserverUiContinueModeOverlayTap,
-    TserverUiContinueModeAuto
+    TserverUiContinueModeOverlayTap
 };
 
 /// One-file native UI pack contract. The SDK owns authorization/network/session state;
@@ -92,6 +91,7 @@ FOUNDATION_EXPORT void TserverForceLoadNativeUiPacks(void);
 - (void)continueFromOverlay;  // never passes a touch to the game
 - (void)openUpdateTapped:(UIButton *)sender; // UPDATE_REQUIRED → open updateUrl
 - (void)changeKeyTapped;      // EXPIRED / REVOKED / error → switch to key entry
+- (void)closeAndTerminateTapped; // fatal config error (no URL scheme) → quit
 @end
 
 NS_ASSUME_NONNULL_END

@@ -1,4 +1,5 @@
 #import "TserverSimpleUiPack.h"
+#import "TserverGateUI.h"
 #import "../CyberTerminalPrivate.h"
 
 void TserverCyberTerminalBuildResult(TserverSimpleUiPackBase *pack) {
@@ -16,6 +17,13 @@ void TserverCyberTerminalBuildResult(TserverSimpleUiPackBase *pack) {
         : [pack screenString:@"subtitle" fallback:(valid ? @"Session verified" : (updateRequired ? @"Vui long cap nhat de tiep tuc." : @"Input or network failure"))];
     NSString *buttonText = [pack screenString:@"buttonText" fallback:(valid ? @"Tiep tuc" : (updateRequired ? @"Cap nhat" : @"Thu lai"))];
     NSString *tapHint = [pack screenString:@"tapHint" fallback:@"Cham de tiep tuc"];
+    // A missing URL scheme is a build defect, not an auth outcome: name it, and
+    // replace whatever retry/change-key copy the pack picked with a Close.
+    BOOL fatalConfigError = TserverGateResultIsFatalConfigError(pack.context.result);
+    if (fatalConfigError) {
+        title = [pack screenString:@"title" fallback:@" Cau hinh app chua dung"];
+        buttonText = [pack screenString:@"closeButtonText" fallback:TserverGateFatalConfigCloseButtonTitle()];
+    }
 
     UIColor *tone = valid ? [pack successColor] : (loading ? [pack accentColor] : [pack dangerColor]);
     TCTAppendLine(pack, valid ? @"> AUTH_OK" : (loading ? @"> AUTH_RUNNING" : (updateRequired ? @"> UPDATE_REQUIRED" : @"> AUTH_FAIL")), tone);
@@ -55,26 +63,35 @@ void TserverCyberTerminalBuildResult(TserverSimpleUiPackBase *pack) {
 
     TserverUiContinueMode mode = [pack resolvedContinueMode];
     if (valid) {
+        // Report what was authorized before asking the user to continue.
+        NSDictionary *licenseInfo = TserverGateLicenseInfoFromResult(pack.context.result);
+        if (licenseInfo.count > 0) {
+            [inner addArrangedSubview:TCTLine(pack, @"> license_granted = true", tone, compact ? 10 : 11)];
+            [inner addArrangedSubview:TserverGateLicenseInfoView(licenseInfo,
+                                                                 [pack textColor],
+                                                                 [pack mutedTextColor],
+                                                                 [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold])];
+        }
         if (mode == TserverUiContinueModeButton) {
             UIButton *button = [pack button:buttonText action:@selector(continueFromOverlay)];
             button.titleLabel.font = TCTFont(compact ? 13 : 14);
             button.layer.cornerRadius = 10;
             [inner addArrangedSubview:button];
-        } else if (mode == TserverUiContinueModeOverlayTap) {
+        } else {
             [inner addArrangedSubview:TCTLine(pack, [NSString stringWithFormat:@"> %@", tapHint], [pack mutedTextColor], compact ? 10 : 11)];
             UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:pack action:@selector(continueFromOverlay)];
             [pack.root addGestureRecognizer:tap];
-        } else if (mode == TserverUiContinueModeAuto) {
-            if (!compact) {
-                [inner addArrangedSubview:TCTLine(pack, @"> auto_continue in 0.35s", [pack mutedTextColor], 11)];
-            }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [pack continueFromOverlay];
-            });
         }
     } else if (updateRequired) {
         UIButton *button = [pack button:buttonText action:@selector(openUpdateTapped:)];
         if (updateUrl.length > 0) button.accessibilityValue = updateUrl;
+        button.titleLabel.font = TCTFont(compact ? 13 : 14);
+        button.layer.cornerRadius = 10;
+        [inner addArrangedSubview:button];
+    } else if (fatalConfigError) {
+        // Single Close button that quits. No retry, no key entry: this app can
+        // never complete Device Verify, so any other action is a dead end.
+        UIButton *button = [pack button:buttonText action:@selector(closeAndTerminateTapped)];
         button.titleLabel.font = TCTFont(compact ? 13 : 14);
         button.layer.cornerRadius = 10;
         [inner addArrangedSubview:button];

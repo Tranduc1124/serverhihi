@@ -66,10 +66,9 @@
             @"shadow": @YES
         },
         @"flow": @{
-            // validAction: button | anywhere | auto
+            // validAction: button | anywhere
             // button   = hiện nút Tiếp tục
             // anywhere = không nút, chạm đâu trên UI cũng tiếp tục
-            // auto     = không nút (app có thể tự continue)
             @"minimumLoadingMs": @550,
             @"validAction": @"button"
         },
@@ -489,7 +488,7 @@
             @"valid": @{
                 @"title": @"Key hop le",
                 @"subtitle": @"Xac nhan de vao menu.",
-                // continueMode: button | anywhere | auto
+                // continueMode: button | anywhere
                 @"continueMode": @"button",
                 @"buttonText": @"Tiep tuc",
                 @"tapHint": @"Chạm vào màn hình để tiếp tục"

@@ -9,7 +9,7 @@ static NSDictionary *TserverCustomerDefaultAuthUiConfig(void) {
         @"layout": @"floating",
         @"flow": @{
             @"minimumLoadingMs": @550,
-            @"validAction": @"auto"
+            @"validAction": @"button"
         },
         @"geometry": @{
             @"horizontalInset": @18,

@@ -4,9 +4,13 @@
 #import "TserverTemplateRegistry.h"
 #import "APIClient.h"
 #import "TserverAuthorizationLease.h"
+#import <signal.h>
+#import <unistd.h>
+#import <stdio.h>
 
 @interface TserverStorage : NSObject
 + (NSDictionary *)lastAuthUiConfig;
++ (NSString *)clientInstallId;
 @end
 
 NSString * const TserverGateEventNeedUUID = @"NEED_UUID";
@@ -15,6 +19,142 @@ NSString * const TserverGateEventExpired = @"EXPIRED";
 NSString * const TserverGateEventRevoked = @"REVOKED";
 NSString * const TserverGateEventValid = @"VALID";
 NSString * const TserverGateEventDismissed = @"DISMISSED";
+
+NSString * const TserverGateFatalConfigErrorCode = @"return_scheme_not_registered";
+
+BOOL TserverGateResultIsFatalConfigError(NSDictionary *result) {
+    if (![result isKindOfClass:NSDictionary.class]) return NO;
+    id code = result[@"errorCode"];
+    if (![code isKindOfClass:NSString.class]) return NO;
+    return [(NSString *)code caseInsensitiveCompare:TserverGateFatalConfigErrorCode] == NSOrderedSame;
+}
+
+NSString *TserverGateFatalConfigCloseButtonTitle(void) {
+    return @"Đóng";
+}
+
+// Only the first tap quits; a second one must not race the dying process.
+static BOOL gTserverGateTerminating = NO;
+
+void TserverGateTerminateApp(void) {
+    if (gTserverGateTerminating) return;
+    gTserverGateTerminating = YES;
+    fflush(stdout);
+    fflush(stderr);
+    // UIKit has no public "terminate" API, so exit() is how a user-initiated
+    // quit ends the process.
+    exit(0);
+    // Reachable only when a hook swapped exit() for a no-op. Staying alive would
+    // strand the user on a non-dismissible overlay whose only button does
+    // nothing, so kill the process instead — same reasoning as TserverFridaGuard.
+    kill(getpid(), SIGKILL);
+    _exit(0);
+}
+
+static NSString *TserverGateInfoString(NSDictionary *source, NSString *key) {
+    id value = source[key];
+    return [value isKindOfClass:NSString.class] ? value : @"";
+}
+
+static NSString *TserverGateInfoLicenseDictionary(NSDictionary *result) {
+    id license = result[@"license"];
+    return [license isKindOfClass:NSDictionary.class] ? license : @{};
+}
+
+static NSString *TserverGateFormattedExpiry(NSDictionary *license) {
+    if (!license.count) return @"";
+    id isLifetime = license[@"isLifetime"];
+    if ([isLifetime respondsToSelector:@selector(boolValue)] && [isLifetime boolValue]) {
+        return @"Vĩnh viễn";
+    }
+    // remainingSeconds is the authoritative countdown the server already computed;
+    // effectiveExpiresAt is the fallback when a lifetime/never-expiring license has none.
+    id remaining = license[@"remainingSeconds"];
+    if ([remaining respondsToSelector:@selector(doubleValue)] && [remaining doubleValue] > 0) {
+        double total = [remaining doubleValue];
+        NSInteger days = (NSInteger)(total / 86400.0);
+        NSInteger hours = (NSInteger)((total - days * 86400.0) / 3600.0);
+        NSInteger minutes = (NSInteger)((total - days * 86400.0 - hours * 3600.0) / 60.0);
+        if (days > 0) return [NSString stringWithFormat:@"%ld ngày %ld giờ", (long)days, (long)hours];
+        if (hours > 0) return [NSString stringWithFormat:@"%ld giờ %ld phút", (long)hours, (long)minutes];
+        return [NSString stringWithFormat:@"%ld phút", (long)MAX(1, minutes)];
+    }
+    NSString *expiresAt = TserverGateInfoString(license, @"effectiveExpiresAt");
+    if (expiresAt.length == 0) expiresAt = TserverGateInfoString(license, @"expiresAt");
+    if (expiresAt.length == 0) return @"Không xác định";
+    // Server sends ISO-8601 UTC; trim to a readable local-agnostic day/hour.
+    NSString *trimmed = [expiresAt stringByReplacingOccurrencesOfString:@"Z" withString:@""];
+    NSArray<NSString *> *parts = [trimmed componentsSeparatedByString:@"T"];
+    if (parts.count == 2) {
+        NSString *day = parts[0];
+        NSString *time = [[parts[1] componentsSeparatedByString:@"."].firstObject
+                          componentsSeparatedByString:@"-"].firstObject;
+        return time.length > 0 ? [NSString stringWithFormat:@"%@ %@", day, time] : day;
+    }
+    return trimmed;
+}
+
+NSDictionary *TserverGateLicenseInfoFromResult(NSDictionary *result) {
+    if (![result isKindOfClass:NSDictionary.class]) return @{};
+    NSDictionary *license = TserverGateInfoLicenseDictionary(result);
+
+    // Prefer the masked key: the raw key is never part of a bootstrap response.
+    NSString *keyText = TserverGateInfoString(license, @"maskedKey");
+    if (keyText.length == 0) keyText = TserverGateInfoString(license, @"licenseKeyMasked");
+
+    // The device identifier the SDK stores per install is the only value it holds
+    // locally; the server never sends the raw UDID back.
+    NSString *deviceText = [TserverStorage clientInstallId] ?: @"";
+
+    NSString *expiryText = TserverGateFormattedExpiry(license);
+
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    if (keyText.length > 0) info[@"keyText"] = keyText;
+    if (expiryText.length > 0) info[@"expiryText"] = expiryText;
+    if (deviceText.length > 0) info[@"deviceText"] = deviceText;
+    return info;
+}
+
+UIView *TserverGateLicenseInfoView(NSDictionary *info,
+                                   UIColor *textColor,
+                                   UIColor *mutedTextColor,
+                                   UIFont *valueFont) {
+    if (![info isKindOfClass:NSDictionary.class] || info.count == 0) return [UIView new];
+    UIColor *valueColor = textColor ?: UIColor.whiteColor;
+    UIColor *labelColor = mutedTextColor ?: [UIColor colorWithWhite:0.75 alpha:1];
+    UIFont *resolvedValueFont = valueFont ?: [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+
+    UIStackView *stack = [[UIStackView alloc] initWithFrame:CGRectZero];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 6;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSArray<NSArray<NSString *> *> *rows = @[
+        @[@"Key đang dùng", info[@"keyText"] ?: @""],
+        @[@"Hết hạn", info[@"expiryText"] ?: @""],
+        @[@"UUID máy", info[@"deviceText"] ?: @""]
+    ];
+    for (NSArray<NSString *> *row in rows) {
+        NSString *label = row[0];
+        NSString *value = row[1];
+        if (![value isKindOfClass:NSString.class] || value.length == 0) continue;
+        UILabel *labelLabel = [UILabel new];
+        labelLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        labelLabel.text = label;
+        labelLabel.textColor = labelColor;
+        labelLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
+        UILabel *valueLabel = [UILabel new];
+        valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        valueLabel.text = value;
+        valueLabel.textColor = valueColor;
+        valueLabel.font = resolvedValueFont;
+        valueLabel.numberOfLines = 0;
+        valueLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [stack addArrangedSubview:labelLabel];
+        [stack addArrangedSubview:valueLabel];
+    }
+    return stack;
+}
 
 @interface TserverUIConfig : NSObject
 @property(nonatomic, strong) NSDictionary *rawConfig;
@@ -82,6 +222,7 @@ static NSTimeInterval TserverGateLoadingStartTime = 0;
 + (BOOL)presentNoticeFromResult:(NSDictionary *)result completion:(dispatch_block_t)completion;
 + (void)presentThemedNotice:(NSDictionary *)notice completion:(dispatch_block_t)completion;
 + (void)presentNoticeIfNeeded:(NSDictionary *)result;
++ (NSString *)licenseSummaryText:(NSDictionary *)result;
 @end
 
 static NSString *TserverGateTemplateKey(NSDictionary *config) {
@@ -95,18 +236,22 @@ static NSString *TserverGateTemplateKey(NSDictionary *config) {
            [status isEqualToString:TserverStatusOfflineGraceValid];
 }
 
-+ (NSString *)normalizedContinueMode:(NSString *)mode {
+NSString *TserverGateNormalizedValidContinueMode(NSString *mode) {
     NSString *value = [mode isKindOfClass:NSString.class] ? mode.lowercaseString : @"";
     if ([value isEqualToString:@"tap"] || [value isEqualToString:@"any"] || [value isEqualToString:@"fullscreen"]) {
         value = @"anywhere";
     }
-    if (![value isEqualToString:@"button"] &&
-        ![value isEqualToString:@"anywhere"] &&
-        ![value isEqualToString:@"tap_anywhere"] &&
-        ![value isEqualToString:@"auto"]) {
-        return @"auto";
+    // "auto" is no longer offered by the portal. It resolved to a no-button screen
+    // that dismissed itself on a timer, which contradicts a VALID screen that now
+    // reports key/expiry/device. Treat it as the closest supported mode.
+    if ([value isEqualToString:@"auto"] || [value isEqualToString:@"tap_anywhere"]) {
+        value = @"anywhere";
     }
-    return value;
+    return [value isEqualToString:@"button"] ? @"button" : @"anywhere";
+}
+
++ (NSString *)normalizedContinueMode:(NSString *)mode {
+    return TserverGateNormalizedValidContinueMode(mode);
 }
 
 + (NSString *)validContinueModeFromConfigDictionary:(NSDictionary *)config {
@@ -123,7 +268,7 @@ static NSString *TserverGateTemplateKey(NSDictionary *config) {
     }
     if (mode.length == 0) {
         NSDictionary *flow = [safeConfig[@"flow"] isKindOfClass:NSDictionary.class] ? safeConfig[@"flow"] : @{};
-        mode = [flow[@"validAction"] isKindOfClass:NSString.class] ? flow[@"validAction"] : @"auto";
+        mode = [flow[@"validAction"] isKindOfClass:NSString.class] ? flow[@"validAction"] : @"button";
     }
     return [self normalizedContinueMode:mode];
 }
@@ -452,6 +597,28 @@ static NSString *TserverGateTemplateKey(NSDictionary *config) {
     [[TserverGateWindow shared] showGateView:blocker makeKey:NO];
 }
 
+/// One-line license summary for the system-alert VALID screen, which cannot host
+/// the multi-row view the renderers use. Returns nil when the response carried no
+/// license, so nothing is added to the alert.
++ (NSString *)licenseSummaryText:(NSDictionary *)result {
+    NSDictionary *info = TserverGateLicenseInfoFromResult(result);
+    if (info.count == 0) return nil;
+    NSMutableArray<NSString *> *rows = [NSMutableArray array];
+    NSString *keyText = info[@"keyText"];
+    NSString *expiryText = info[@"expiryText"];
+    NSString *deviceText = info[@"deviceText"];
+    if ([keyText isKindOfClass:NSString.class] && keyText.length > 0) {
+        [rows addObject:[NSString stringWithFormat:@"Key: %@", keyText]];
+    }
+    if ([expiryText isKindOfClass:NSString.class] && expiryText.length > 0) {
+        [rows addObject:[NSString stringWithFormat:@"Hết hạn: %@", expiryText]];
+    }
+    if ([deviceText isKindOfClass:NSString.class] && deviceText.length > 0) {
+        [rows addObject:[NSString stringWithFormat:@"UUID: %@", deviceText]];
+    }
+    return rows.count > 0 ? [rows componentsJoinedByString:@"\n"] : nil;
+}
+
 + (void)presentSystemAlertStatus:(NSString *)status
                           result:(NSDictionary *)result
                           config:(NSDictionary *)configDictionary
@@ -500,7 +667,20 @@ static NSString *TserverGateTemplateKey(NSDictionary *config) {
         }];
     }
 
-    if ([self isValidStatus:status]) {
+    if (TserverGateResultIsFatalConfigError(result)) {
+        // Only one action, and it quits: nothing else can fix a missing scheme.
+        NSString *closeTitle = [screen[@"closeButtonText"] isKindOfClass:NSString.class] && [screen[@"closeButtonText"] length] > 0
+            ? screen[@"closeButtonText"]
+            : TserverGateFatalConfigCloseButtonTitle();
+        [alert addAction:[UIAlertAction actionWithTitle:closeTitle style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+            TserverGateTerminateApp();
+        }]];
+    } else if ([self isValidStatus:status]) {
+        // Report what was authorized before offering to continue.
+        NSString *licenseSummary = [self licenseSummaryText:result];
+        if (licenseSummary.length > 0) {
+            [alert addAction:[UIAlertAction actionWithTitle:licenseSummary style:UIAlertActionStyleDefault handler:nil]];
+        }
         NSString *validButton = buttonText.length > 0 ? buttonText : @"Tiếp tục";
         [alert addAction:[UIAlertAction actionWithTitle:validButton style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
             if (continueAuth) continueAuth();
@@ -607,13 +787,21 @@ static NSString *TserverGateTemplateKey(NSDictionary *config) {
         [self configureWithAuthConfig:config];
     }
 
+    if (TserverGateResultIsFatalConfigError(safeResult)) {
+        // The host app declares no URL scheme, so the Device Verify callback can
+        // never come back: retry and key entry are both dead ends (activating
+        // needs the session token this app could never obtain). Show the fatal
+        // config screen instead, with no retry handler attached so no downstream
+        // branch can swap in a button that leads nowhere.
+        [self presentStatus:status result:safeResult config:config retry:nil];
+        return;
+    }
+
     if ([self isValidStatus:status]) {
+        // The VALID screen always presents. A self-dismissing variant existed once
+        // ("auto"), but the screen now reports key/expiry/device, so it must stay
+        // until the user chooses to continue.
         NSDictionary *validResult = [safeResult copy];
-        NSString *continueMode = [self validContinueModeFromConfigDictionary:config];
-        if ([continueMode isEqualToString:@"auto"]) {
-            [self completeValidResult:validResult];
-            return;
-        }
         [self presentStatus:status result:validResult config:config retry:nil];
         return;
     }
