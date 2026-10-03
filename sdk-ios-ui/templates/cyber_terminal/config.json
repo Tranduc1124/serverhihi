@@ -1,0 +1,10 @@
+{
+  "templateName": "cyber_terminal",
+  "renderer": { "id": "cyber_terminal", "revision": 1 },
+  "layout": "floating",
+  "style": { "accent": "#39F6C0", "background": "#03130F", "card": "#08251C", "text": "#E8FFF8", "mutedText": "#78B6A4", "danger": "#FF617A", "success": "#4FFFB8", "radius": 12, "blur": false, "shadow": true },
+  "geometry": { "maxCardWidth": 400, "minCardWidth": 300, "horizontalInset": 40 },
+  "animation": { "type": "fade", "durationMs": 250, "distance": 12 },
+  "motion": { "haptic": "light", "scan": true },
+  "popup": { "enabled": true, "presentation": "terminal_status", "position": "topTrailing", "width": 246, "opacity": 0.92, "radius": 10, "showProgress": true, "animateProgress": true, "progressFrom": 0, "progressTo": 100, "durationMs": 1800, "collapseOnComplete": true, "collapseDelayMs": 650 }
+}

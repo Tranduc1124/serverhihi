@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "id": "cyber_terminal",
+  "name": "Cyber Terminal",
+  "description": "Terminal hacker cyber: scan, command prompt, key entry và UUID wizard.",
+  "tags": ["native", "terminal", "cyber", "hacker", "game"],
+  "rendererId": "cyber_terminal",
+  "rendererRevision": 1,
+  "minimumSdkUiRevision": 2,
+  "isDefault": false,
+  "fallbackTemplate": "apple_glass",
+  "layout": "floating",
+  "supportedOverrides": ["style", "screens", "assets", "animation", "typography", "popup", "geometry"]
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "id": "apple_glass",
+  "name": "Apple System Alert",
+  "description": "Hộp thoại iOS mặc định bằng UIAlertController, dùng cho key, UUID và trạng thái xác thực.",
+  "tags": ["native", "system", "apple", "alert", "uialertcontroller", "minimal", "ios"],
+  "rendererId": "apple_glass",
+  "rendererRevision": 1,
+  "minimumSdkUiRevision": 2,
+  "isDefault": true,
+  "fallbackTemplate": null,
+  "layout": "floating",
+  "supportedOverrides": ["style", "screens", "assets", "animation", "typography", "popup", "geometry"]
+}

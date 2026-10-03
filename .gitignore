@@ -1,0 +1,11 @@
+.theos/
+dist/
+build/
+*.o
+*.d
+.DS_Store
+.env
+packages/
+*.ipa
+*.tipa
+*.deb

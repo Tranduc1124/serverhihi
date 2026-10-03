@@ -1,0 +1,99 @@
+APIClient SDK — customer integration
+====================================
+
+Use only the current two-file SDK package:
+
+  APIClient.h
+  libAPIClient.a
+
+1. Copy both files to the tweak/dylib source project.
+2. Link these Apple frameworks:
+
+  Foundation
+  UIKit
+  Security
+  SafariServices
+
+   The current archive is universal for iOS arm64 and arm64e. An arm64-only
+   host can use the arm64 slice; an arm64e host/dylib should select its native
+   arm64e slice when the build system supports both.
+
+3. Configure the package token, then authorize + gate every paid action:
+
+  #import "APIClient.h"
+
+  // Set kAPIClientPackageToken once in APIClient.h.
+  // Auto-setup configures the SDK; native UI pack is selected only on the web.
+  APIClientStartAuthorization(^{
+      APIClientPerformAuthorized(@"paid", ^{
+          myLabel.text = [APIClient renderTemplate:
+              @"Key: %tserver_key%\nHạn: %tserver_timekeyt%\nDevices: %tserver_max_devices%"];
+      }, ^{
+          // Tear down paid UI if the capability check fails.
+      });
+  }, ^{
+      // Lease revoked/expired — tear down paid UI/features.
+  });
+
+4. Forward URL callbacks:
+
+  - (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary *)options {
+      return APIClientHandleOpenURL(url);
+  }
+
+5. Optional Logos-compatible one-shot helpers:
+
+   // Opens paid only after a fresh signed-lease capability check.
+   apiclient_paid(^{
+       // openMenu / enablePaidFeature
+   });
+
+   // Submit a key only after the normal device/profile flow is available.
+   // The JSON is sanitized metadata; raw key/session tokens are never returned.
+   apiclient_on_login(inputKey.UTF8String, ^(const char *json) {
+       // key accepted; re-check the live lease at the paid boundary
+       APIClientOpenPaid(^{
+           // openMenu / enablePaidFeature
+       });
+   }, ^(const char *json) {
+       // show the sanitized failure status
+   });
+
+   `apiclient_paid` and `apiclient_on_login` are compatibility spellings. They
+   still use the same ECDSA/ES256 transport, activation attempt serialization,
+   and lease capability check as the Objective-C API; a callback is not proof
+   by itself. For new code prefer `APIClientOpenPaid` and
+   `APIClientConfirmKey`.
+
+Notes
+-----
+
+- Gate visibility / onAuthorized is NOT entitlement. Call
+  APIClientPerformAuthorized around each paid feature entrypoint.
+- Menu key-time text uses the live lease (pkg_ only).
+- Deprecated shims (APIClientStart / APIClientIsValid / +start: / +isValid / +paid:)
+  remain linked for old sources but should not be used in new code.
+- Endpoints, hostnames, and auth headers are sealed inside libAPIClient.a.
+  Do not expect them in the public header.
+
+Package announcements
+---------------------
+
+From the package's Hành động tab, choose Gửi thông báo and target All SDK UI.
+The current native SDK shows the signed title/message with two actions:
+
+  Đóng                  Acknowledge and continue
+  Đóng trong 3 giờ     Hide on this device for three hours and continue
+
+The three-hour dismissal is local to the device. A newer package announcement
+replaces the previous active announcement. Older SDK archives do not render this
+optional signed field; distribute an archive built from this source to enable
+the prompt.
+
+Build/release rules
+-------------------
+
+- `pkg_...` is the customer package token. If rotated, update source and rebuild.
+- The private global client key is baked inside `libAPIClient.a` by the vendor.
+  Never configure it in customer source.
+- Link `libAPIClient.a`; do not use retired `libTserverAuth.a`.

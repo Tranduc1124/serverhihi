@@ -1,0 +1,92 @@
+name: Build libAPIClient.a
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-sdk:
+    # macOS, not Linux: an archive built with the Linux toolchain emits
+    # "object file built with an incompatible arm64e ABI" on Apple's linker and
+    # crashes at dyld initializer time with a pointer-authentication fault.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          submodules: recursive
+
+      - name: Install iOS SDK
+        run: |
+          export THEOS="$GITHUB_WORKSPACE/theos"
+          mkdir -p "$THEOS/sdks"
+          git clone --depth 1 https://github.com/Tonwalter888/iOS-SDKs.git /tmp/sdks
+          cp -R /tmp/sdks/iPhoneOS18.6.sdk "$THEOS/sdks/"
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+
+      - name: Install tools
+        run: |
+          # after-all packaging needs llvm-strip on PATH.
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      - name: Require CLIENT_API_KEY secret
+        run: |
+          if [ -z "${{ secrets.TSERVER_CLIENT_API_KEY }}" ]; then
+            echo "::error::Repository secret TSERVER_CLIENT_API_KEY is not set (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Build libAPIClient.a
+        env:
+          # Only secret input. The other two are public material.
+          TSERVER_CLIENT_API_KEY: ${{ secrets.TSERVER_CLIENT_API_KEY }}
+          TSERVER_AUTHORIZATION_PUBLIC_KEYS: |
+            lease-2026-01=/tmp/lease-2026-01.pem
+          TSERVER_TLS_SPKI_PIN: 673302402ccbce7d0f8c4c969a4e4c9b577d25803935cf24820a038cae308032
+          # Keep the committed client identity so the kid stays the one already
+          # registered on the server; a fresh keypair would need re-registration.
+          TSERVER_REUSE_CLIENT_IDENTITY: "1"
+        run: |
+          cat > /tmp/lease-2026-01.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEJS1nd/jbHITIz5fRgP1mEf7d46bK
+          fymBK9VgmKNWV2+BmVgaC0mDhKdiVBxS4alopQeN3yHZTMARBkIgN8Y3ZA==
+          -----END PUBLIC KEY-----
+          PEM
+          cd sdk-ios
+          make clean
+          # Match the SDK installed above; STRIP stays default on macOS.
+          make all TARGET=iphone:clang:18.6:13.0 ARCHS="arm64 arm64e" 2>&1 | tail -40
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: APIClient
+          path: dist/APIClient/libAPIClient.a
+          if-no-files-found: error
+
+      - name: Attach to release
+        run: |
+          TAG="sdk-latest"
+          gh release upload "$TAG" dist/APIClient/libAPIClient.a --clobber --repo "$GITHUB_REPOSITORY" 2>/dev/null || \
+          gh release create "$TAG" dist/APIClient/libAPIClient.a \
+            --title "libAPIClient.a latest" \
+            --notes "Auto build $(date -u +%Y-%m-%d_%H:%M) UTC — commit ${GITHUB_SHA::7}" \
+            --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Summary
+        run: |
+          echo "### libAPIClient.a" >> "$GITHUB_STEP_SUMMARY"
+          shasum -a 256 dist/APIClient/libAPIClient.a | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -c "import json;print('kid =', json.load(open('sdk-ios/client-identity.json'))['kid'])" | tee -a "$GITHUB_STEP_SUMMARY"
