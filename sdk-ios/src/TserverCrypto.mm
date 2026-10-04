@@ -118,28 +118,6 @@ static BOOL TserverTransportContextValid(NSString *sessionId, NSString *directio
     return statusCode >= 0 && statusCode <= 999;
 }
 
-static NSArray<NSMutableData *> *TserverTransportV2Keys(NSData *masterKey, NSString *sessionId, NSString *direction) {
-    if (masterKey.length != 32) return nil;
-    NSData *saltMaterial = [[NSString stringWithFormat:TS_OBF_NS("tserver-transport-v2|%@"), sessionId ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
-    uint8_t saltBytes[CC_SHA256_DIGEST_LENGTH] = {0};
-    CC_SHA256(saltMaterial.bytes, (CC_LONG)saltMaterial.length, saltBytes);
-    NSData *salt = [NSData dataWithBytes:saltBytes length:sizeof(saltBytes)];
-    NSData *encInfo = [[NSString stringWithFormat:TS_OBF_NS("tserver-v2|%@|enc"), direction ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
-    NSData *macInfo = [[NSString stringWithFormat:TS_OBF_NS("tserver-v2|%@|mac"), direction ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
-    NSMutableData *encKey = TserverHKDFSHA256(masterKey, salt, encInfo, 32);
-    NSMutableData *macKey = TserverHKDFSHA256(masterKey, salt, macInfo, 32);
-    return encKey.length == 32 && macKey.length == 32 ? @[encKey, macKey] : nil;
-}
-
-static NSData *TserverTransportV2MacMaterial(NSString *direction, NSString *sessionId, NSString *method, NSString *path, NSString *nonce, NSInteger statusCode, NSData *iv, NSData *ciphertext) {
-    NSString *metadata = [NSString stringWithFormat:TS_OBF_NS("ts2|%@|%@|%@|%@|%@|%ld|"),
-        direction, sessionId, method.uppercaseString, path, nonce, (long)statusCode];
-    NSMutableData *material = [NSMutableData dataWithData:[metadata dataUsingEncoding:NSUTF8StringEncoding]];
-    [material appendData:iv];
-    [material appendData:ciphertext];
-    return material;
-}
-
 static NSMutableData *TserverTransportV3EncKey(NSData *masterKey, NSString *sessionId, NSString *direction) {
     if (masterKey.length != 32) return nil;
     NSData *saltMaterial = [[NSString stringWithFormat:TS_OBF_NS("tserver-transport-v3|%@"), sessionId ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
@@ -263,15 +241,6 @@ static BOOL TserverAES256GCMCrypt(CCOperation op,
     [dataOut setLength:moved];
     [tag setLength:kTserverGCMTagBytes];
     return YES;
-}
-
-static BOOL TserverConstantTimeHexEqual(NSString *left, NSString *right) {
-    if (left.length != 64 || right.length != 64) return NO;
-    NSString *a = left.lowercaseString;
-    NSString *b = right.lowercaseString;
-    NSUInteger difference = 0;
-    for (NSUInteger index = 0; index < 64; index++) difference |= [a characterAtIndex:index] ^ [b characterAtIndex:index];
-    return difference == 0;
 }
 
 static void TserverWipeMutableData(NSMutableData *data) {
