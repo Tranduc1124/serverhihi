@@ -47,27 +47,6 @@ enum {
 + (BOOL)verifyResponse:(NSDictionary *)response
              apiSecret:(NSString *)apiSecret
 requiredSignatureScope:(NSString *)requiredSignatureScope;
-/// App-layer transport envelope (AES-256-CBC + HMAC-SHA256). Matches server transportCrypto.ts.
-+ (NSDictionary *)encryptTransportPayload:(id)payload clientApiKey:(NSString *)clientApiKey;
-+ (NSDictionary *)decryptTransportEnvelope:(NSDictionary *)envelope clientApiKey:(NSString *)clientApiKey;
-+ (NSDictionary *)encryptTransportPayload:(id)payload rawKey:(NSData *)rawKey;
-+ (NSDictionary *)decryptTransportEnvelope:(NSDictionary *)envelope rawKey:(NSData *)rawKey;
-+ (NSDictionary *)encryptTransportPayloadV2:(id)payload
-                                     rawKey:(NSData *)rawKey
-                                  sessionId:(NSString *)sessionId
-                                  direction:(NSString *)direction
-                                     method:(NSString *)method
-                                       path:(NSString *)path
-                                      nonce:(NSString *)nonce
-                                 statusCode:(NSInteger)statusCode;
-+ (NSDictionary *)decryptTransportEnvelopeV2:(NSDictionary *)envelope
-                                      rawKey:(NSData *)rawKey
-                                   sessionId:(NSString *)sessionId
-                                   direction:(NSString *)direction
-                                      method:(NSString *)method
-                                        path:(NSString *)path
-                                       nonce:(NSString *)nonce
-                                  statusCode:(NSInteger)statusCode;
 + (NSDictionary *)encryptTransportPayloadV3:(id)payload
                                      rawKey:(NSData *)rawKey
                                   sessionId:(NSString *)sessionId
@@ -84,8 +63,6 @@ requiredSignatureScope:(NSString *)requiredSignatureScope;
                                         path:(NSString *)path
                                        nonce:(NSString *)nonce
                                   statusCode:(NSInteger)statusCode;
-+ (BOOL)isTransportEnvelope:(id)value;
-+ (BOOL)isTransportEnvelopeV2:(id)value;
 + (BOOL)isTransportEnvelopeV3:(id)value;
 + (NSDictionary *)clientIdentityHeadersForMethod:(NSString *)method
                                             path:(NSString *)path
@@ -408,16 +385,6 @@ requiredSignatureScope:(NSString *)requiredSignatureScope {
     }
     return difference == 0;
 }
-
-+ (NSData *)transportKeyFromClientApiKey:(NSString *)clientApiKey {
-    const char *prefix = TserverSealedStringAt(kTserverSealedStr_TransportV1Prefix);
-    NSString *material = [NSString stringWithFormat:@"%s%@", (prefix && prefix[0]) ? prefix : "tserver-transport-v1|", clientApiKey ?: @""];
-    NSData *data = [material dataUsingEncoding:NSUTF8StringEncoding];
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-    return [NSData dataWithBytes:digest length:CC_SHA256_DIGEST_LENGTH];
-}
-
 + (NSString *)base64UrlEncodeData:(NSData *)data {
     if (data.length == 0) return @"";
     NSString *b64 = [data base64EncodedStringWithOptions:0];
@@ -457,208 +424,6 @@ requiredSignatureScope:(NSString *)requiredSignatureScope {
     return [iv rangeOfCharacterFromSet:base64Invalid].location == NSNotFound &&
         [ct rangeOfCharacterFromSet:base64Invalid].location == NSNotFound;
 }
-
-+ (BOOL)isTransportEnvelope:(id)value {
-    if (![value isKindOfClass:NSDictionary.class]) return NO;
-    NSDictionary *row = (NSDictionary *)value;
-    NSUInteger keyCount = row.count;
-    if (keyCount == 4) return [self isTransportEnvelopeV3:value];
-    if (keyCount != 5) return NO;
-    if (![[NSSet setWithArray:row.allKeys] isEqualToSet:[NSSet setWithArray:@[@"v", @"m", @"iv", @"ct", @"mac"]]]) return NO;
-    id versionValue = row[@"v"];
-    if (![versionValue isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)versionValue) == CFBooleanGetTypeID()) return NO;
-    NSInteger version = [versionValue integerValue];
-    NSString *mode = [row[@"m"] isKindOfClass:NSString.class] ? row[@"m"] : @"";
-    NSString *iv = [row[@"iv"] isKindOfClass:NSString.class] ? row[@"iv"] : @"";
-    NSString *ct = [row[@"ct"] isKindOfClass:NSString.class] ? row[@"ct"] : @"";
-    NSString *mac = [row[@"mac"] isKindOfClass:NSString.class] ? row[@"mac"] : @"";
-    BOOL typed = (version == 1 && [mode isEqualToString:@"cbc-hmac"]) ||
-        (version == 2 && [mode isEqualToString:@"cbc-hmac-hkdf"]);
-    if (!typed || iv.length == 0 || iv.length > 64 || ct.length == 0 || ct.length > 2 * 1024 * 1024 || mac.length != 64) return NO;
-    NSCharacterSet *base64Invalid = [[NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"] invertedSet];
-    NSCharacterSet *hexInvalid = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"] invertedSet];
-    return [iv rangeOfCharacterFromSet:base64Invalid].location == NSNotFound &&
-        [ct rangeOfCharacterFromSet:base64Invalid].location == NSNotFound &&
-        [mac rangeOfCharacterFromSet:hexInvalid].location == NSNotFound;
-}
-
-+ (BOOL)isTransportEnvelopeV2:(id)value {
-    if (![value isKindOfClass:NSDictionary.class] || [(NSDictionary *)value count] != 5) return NO;
-    if (![self isTransportEnvelope:value]) return NO;
-    NSDictionary *row = (NSDictionary *)value;
-    return [row[@"v"] integerValue] == 2 && [row[@"m"] isEqualToString:@"cbc-hmac-hkdf"];
-}
-
-+ (NSDictionary *)encryptTransportPayload:(id)payload rawKey:(NSData *)rawKey {
-    if (rawKey.length != 32) return nil;
-    NSString *json = [self jsonStringForObject:payload ?: @{}];
-    NSData *plain = [json dataUsingEncoding:NSUTF8StringEncoding];
-    if (plain.length == 0) plain = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-
-    uint8_t ivBytes[kCCBlockSizeAES128];
-    if (SecRandomCopyBytes(kSecRandomDefault, sizeof(ivBytes), ivBytes) != errSecSuccess) {
-        arc4random_buf(ivBytes, sizeof(ivBytes));
-    }
-    NSData *iv = [NSData dataWithBytes:ivBytes length:sizeof(ivBytes)];
-
-    size_t outLen = plain.length + kCCBlockSizeAES128;
-    NSMutableData *cipher = [NSMutableData dataWithLength:outLen];
-    size_t moved = 0;
-    CCCryptorStatus st = CCCrypt(kCCEncrypt,
-                                 kCCAlgorithmAES,
-                                 kCCOptionPKCS7Padding,
-                                 rawKey.bytes,
-                                 rawKey.length,
-                                 iv.bytes,
-                                 plain.bytes,
-                                 plain.length,
-                                 cipher.mutableBytes,
-                                 cipher.length,
-                                 &moved);
-    if (st != kCCSuccess) return nil;
-    cipher.length = moved;
-
-    NSMutableData *macMaterial = [NSMutableData dataWithData:iv];
-    [macMaterial appendData:cipher];
-    unsigned char macDigest[CC_SHA256_DIGEST_LENGTH];
-    CCHmac(kCCHmacAlgSHA256, rawKey.bytes, rawKey.length, macMaterial.bytes, macMaterial.length, macDigest);
-    NSString *macHex = TserverHexString(macDigest, CC_SHA256_DIGEST_LENGTH);
-
-    return @{
-        @"v": @1,
-        @"m": @"cbc-hmac",
-        @"iv": [self base64UrlEncodeData:iv] ?: @"",
-        @"ct": [self base64UrlEncodeData:cipher] ?: @"",
-        @"mac": macHex ?: @""
-    };
-}
-
-+ (NSDictionary *)decryptTransportEnvelope:(NSDictionary *)envelope rawKey:(NSData *)rawKey {
-    if (![self isTransportEnvelope:envelope] || [envelope[@"v"] integerValue] != 1 ||
-        ![envelope[@"m"] isEqualToString:@"cbc-hmac"] || rawKey.length != 32) return nil;
-    NSData *iv = [self base64UrlDecodeString:envelope[@"iv"]];
-    NSData *ct = [self base64UrlDecodeString:envelope[@"ct"]];
-    NSString *macHex = [envelope[@"mac"] isKindOfClass:NSString.class] ? [envelope[@"mac"] lowercaseString] : @"";
-    if (iv.length != kCCBlockSizeAES128 || ct.length == 0 || ct.length % kCCBlockSizeAES128 != 0) return nil;
-
-    NSMutableData *macMaterial = [NSMutableData dataWithData:iv];
-    [macMaterial appendData:ct];
-    unsigned char macDigest[CC_SHA256_DIGEST_LENGTH];
-    CCHmac(kCCHmacAlgSHA256, rawKey.bytes, rawKey.length, macMaterial.bytes, macMaterial.length, macDigest);
-    NSString *expected = TserverHexString(macDigest, CC_SHA256_DIGEST_LENGTH);
-    if (![expected.lowercaseString isEqualToString:macHex]) return nil;
-
-    size_t outLen = ct.length + kCCBlockSizeAES128;
-    NSMutableData *plain = [NSMutableData dataWithLength:outLen];
-    size_t moved = 0;
-    CCCryptorStatus st = CCCrypt(kCCDecrypt,
-                                 kCCAlgorithmAES,
-                                 kCCOptionPKCS7Padding,
-                                 rawKey.bytes,
-                                 rawKey.length,
-                                 iv.bytes,
-                                 ct.bytes,
-                                 ct.length,
-                                 plain.mutableBytes,
-                                 plain.length,
-                                 &moved);
-    if (st != kCCSuccess) return nil;
-    plain.length = moved;
-    id json = [NSJSONSerialization JSONObjectWithData:plain options:0 error:nil];
-    return [json isKindOfClass:NSDictionary.class] ? json : nil;
-}
-
-+ (NSDictionary *)encryptTransportPayloadV2:(id)payload
-                                     rawKey:(NSData *)rawKey
-                                  sessionId:(NSString *)sessionId
-                                  direction:(NSString *)direction
-                                     method:(NSString *)method
-                                       path:(NSString *)path
-                                      nonce:(NSString *)nonce
-                                 statusCode:(NSInteger)statusCode {
-    if (!TserverTransportContextValid(sessionId, direction, method, path, nonce, statusCode) || rawKey.length != 32) return nil;
-    NSArray<NSMutableData *> *keys = TserverTransportV2Keys(rawKey, sessionId, direction);
-    if (keys.count != 2) return nil;
-    NSMutableData *encKey = keys[0];
-    NSMutableData *macKey = keys[1];
-    NSString *json = [self jsonStringForObject:payload ?: @{}];
-    NSData *plain = [json dataUsingEncoding:NSUTF8StringEncoding];
-    if (plain.length == 0) plain = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-    if (plain.length > 1024 * 1024) {
-        TserverWipeMutableData(encKey);
-        TserverWipeMutableData(macKey);
-        return nil;
-    }
-    uint8_t ivBytes[kCCBlockSizeAES128] = {0};
-    if (SecRandomCopyBytes(kSecRandomDefault, sizeof(ivBytes), ivBytes) != errSecSuccess) arc4random_buf(ivBytes, sizeof(ivBytes));
-    NSData *iv = [NSData dataWithBytes:ivBytes length:sizeof(ivBytes)];
-    NSMutableData *cipher = [NSMutableData dataWithLength:plain.length + kCCBlockSizeAES128];
-    size_t moved = 0;
-    CCCryptorStatus cryptStatus = CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding,
-        encKey.bytes, encKey.length, iv.bytes, plain.bytes, plain.length,
-        cipher.mutableBytes, cipher.length, &moved);
-    if (cryptStatus != kCCSuccess) {
-        TserverWipeMutableData(encKey);
-        TserverWipeMutableData(macKey);
-        return nil;
-    }
-    cipher.length = moved;
-    NSData *mac = TserverHMACData(macKey, TserverTransportV2MacMaterial(direction, sessionId, method, path, nonce, statusCode, iv, cipher));
-    TserverWipeMutableData(encKey);
-    TserverWipeMutableData(macKey);
-    return mac.length == CC_SHA256_DIGEST_LENGTH ? @{
-        @"v": @2,
-        @"m": @"cbc-hmac-hkdf",
-        @"iv": [self base64UrlEncodeData:iv] ?: @"",
-        @"ct": [self base64UrlEncodeData:cipher] ?: @"",
-        @"mac": TserverHexString((const unsigned char *)mac.bytes, mac.length) ?: @""
-    } : nil;
-}
-
-+ (NSDictionary *)decryptTransportEnvelopeV2:(NSDictionary *)envelope
-                                      rawKey:(NSData *)rawKey
-                                   sessionId:(NSString *)sessionId
-                                   direction:(NSString *)direction
-                                      method:(NSString *)method
-                                        path:(NSString *)path
-                                       nonce:(NSString *)nonce
-                                  statusCode:(NSInteger)statusCode {
-    if (![self isTransportEnvelopeV2:envelope] ||
-        !TserverTransportContextValid(sessionId, direction, method, path, nonce, statusCode) || rawKey.length != 32) return nil;
-    NSArray<NSMutableData *> *keys = TserverTransportV2Keys(rawKey, sessionId, direction);
-    if (keys.count != 2) return nil;
-    NSMutableData *encKey = keys[0];
-    NSMutableData *macKey = keys[1];
-    NSData *iv = [self base64UrlDecodeString:envelope[@"iv"]];
-    NSData *cipher = [self base64UrlDecodeString:envelope[@"ct"]];
-    NSString *providedMac = [envelope[@"mac"] isKindOfClass:NSString.class] ? envelope[@"mac"] : @"";
-    if (iv.length != kCCBlockSizeAES128 || cipher.length < kCCBlockSizeAES128 ||
-        cipher.length > 1024 * 1024 + kCCBlockSizeAES128 || cipher.length % kCCBlockSizeAES128 != 0) {
-        TserverWipeMutableData(encKey);
-        TserverWipeMutableData(macKey);
-        return nil;
-    }
-    NSData *mac = TserverHMACData(macKey, TserverTransportV2MacMaterial(direction, sessionId, method, path, nonce, statusCode, iv, cipher));
-    NSString *expectedMac = TserverHexString((const unsigned char *)mac.bytes, mac.length);
-    if (!TserverConstantTimeHexEqual(expectedMac, providedMac)) {
-        TserverWipeMutableData(encKey);
-        TserverWipeMutableData(macKey);
-        return nil;
-    }
-    NSMutableData *plain = [NSMutableData dataWithLength:cipher.length + kCCBlockSizeAES128];
-    size_t moved = 0;
-    CCCryptorStatus cryptStatus = CCCrypt(kCCDecrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding,
-        encKey.bytes, encKey.length, iv.bytes, cipher.bytes, cipher.length,
-        plain.mutableBytes, plain.length, &moved);
-    TserverWipeMutableData(encKey);
-    TserverWipeMutableData(macKey);
-    if (cryptStatus != kCCSuccess || moved > 1024 * 1024) return nil;
-    plain.length = moved;
-    id json = [NSJSONSerialization JSONObjectWithData:plain options:0 error:nil];
-    TserverWipeMutableData(plain);
-    return [json isKindOfClass:NSDictionary.class] ? json : nil;
-}
-
 + (NSDictionary *)encryptTransportPayloadV3:(id)payload
                                      rawKey:(NSData *)rawKey
                                   sessionId:(NSString *)sessionId
@@ -767,17 +532,6 @@ requiredSignatureScope:(NSString *)requiredSignatureScope {
     headers[TS_OBF_NS("x-ts-client-sig")] = sigB64;
     return headers;
 }
-
-+ (NSDictionary *)encryptTransportPayload:(id)payload clientApiKey:(NSString *)clientApiKey {
-    if (clientApiKey.length == 0) return nil;
-    return [self encryptTransportPayload:payload rawKey:[self transportKeyFromClientApiKey:clientApiKey]];
-}
-
-+ (NSDictionary *)decryptTransportEnvelope:(NSDictionary *)envelope clientApiKey:(NSString *)clientApiKey {
-    if (clientApiKey.length == 0) return nil;
-    return [self decryptTransportEnvelope:envelope rawKey:[self transportKeyFromClientApiKey:clientApiKey]];
-}
-
 static NSString *TserverStableJSONString(id value) {
     if (value == nil || value == (id)kCFNull || [value isKindOfClass:NSNull.class]) return @"null";
     if ([value isKindOfClass:NSString.class]) return TserverJSONStringForString(value);

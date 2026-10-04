@@ -27,7 +27,7 @@
                                         path:(NSString *)path
                                        nonce:(NSString *)nonce
                                   statusCode:(NSInteger)statusCode;
-+ (BOOL)isTransportEnvelope:(id)value;
++ (BOOL)isTransportEnvelopeV3:(id)value;
 + (BOOL)isTransportEnvelopeV3:(id)value;
 + (NSDictionary *)clientIdentityHeadersForMethod:(NSString *)method
                                             path:(NSString *)path
@@ -449,7 +449,11 @@
         }
 
         if (json) {
-            if ([TserverCrypto isTransportEnvelope:json] || [TserverCrypto isTransportEnvelopeV3:json]) {
+            // Transport v3 only. A cbc-hmac / cbc-hmac-hkdf envelope used to be detected
+            // here and handed to the retired v1/v2 decryptor; the server has been
+            // hard-cut to AES-256-GCM, so anything that is not a v3 envelope is
+            // now refused instead of being decrypted.
+            if ([TserverCrypto isTransportEnvelopeV3:json]) {
                 NSDictionary *opened = nil;
                 if (expectedTransportVersion == 3) {
                     __block NSString *responseSessionId = @"";
